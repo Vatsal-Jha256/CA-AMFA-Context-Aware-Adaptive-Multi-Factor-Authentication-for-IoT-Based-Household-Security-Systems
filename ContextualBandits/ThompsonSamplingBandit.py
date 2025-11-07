@@ -19,8 +19,10 @@ class ThompsonSamplingBandit(ContextualBandit):
     def _context_to_key(self, context):
         """Convert context to a string key for lookup"""
         # Simplified context binning
-        day_of_week = datetime.datetime.now().weekday()
-        hour_bin = datetime.datetime.now().hour // 4  # 6 bins of 4 hours each
+        # Use context's hour and day_of_week instead of current time
+        day_of_week = context.get('day_of_week', datetime.datetime.now().weekday())
+        hour = context.get('hour', datetime.datetime.now().hour)
+        hour_bin = hour // 4  # 6 bins of 4 hours each
         return f"{day_of_week}_{hour_bin}"
     
     def select_weights(self, context):
@@ -38,9 +40,20 @@ class ThompsonSamplingBandit(ContextualBandit):
         context_key = self._context_to_key(context)
         # Binary reward signal (0 or 1)
         success = 1 if reward > 0.5 else 0
+        
+        # Increase reward impact for faster learning
+        reward_multiplier = 2.0
+        
         # Update for each factor
         for name in self.factor_names:
             if success:
-                self.alpha[name][context_key] += 1
+                self.alpha[name][context_key] += reward_multiplier
             else:
-                self.beta[name][context_key] += 1
+                self.beta[name][context_key] += reward_multiplier
+                
+            # Decay old observations to favor newer data
+            # This makes the algorithm more responsive to changes
+            if self.alpha[name][context_key] + self.beta[name][context_key] > 50:
+                decay_factor = 0.95
+                self.alpha[name][context_key] *= decay_factor
+                self.beta[name][context_key] *= decay_factor

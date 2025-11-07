@@ -37,7 +37,10 @@ else:
         def control_lock(self, engage):
             print(f"Mock lock {'engaged' if engage else 'disengaged'}")
             
-        def read_keypad(self):
+        def read_keypad(self, direct_input=None):
+            # Direct input option for testing/demo
+            if direct_input is not None:
+                return direct_input
             # Simulate keypad input
             import random
             if random.random() < 0.1:  # 10% chance of returning a key
@@ -72,8 +75,10 @@ class HardwareController:
         # Camera configuration
         self.camera_enabled = False
         self.image_capture_interval = 15  # seconds
-        self.raw_dir = "/home/pi/captured_images/raw" if IS_RASPBERRY_PI else "./captured_images/raw"
-        self.compressed_dir = "/home/pi/captured_images/compressed" if IS_RASPBERRY_PI else "./captured_images/compressed"
+        # Use current user's home directory instead of hardcoding /home/pi/
+        home_dir = os.path.expanduser("~")
+        self.raw_dir = f"{home_dir}/captured_images/raw" if IS_RASPBERRY_PI else "./captured_images/raw"
+        self.compressed_dir = f"{home_dir}/captured_images/compressed" if IS_RASPBERRY_PI else "./captured_images/compressed"
         self.camera_thread = None
         self.camera_running = False
         self.pc_ip = "172.20.10.8"  # Default PC IP
@@ -82,10 +87,14 @@ class HardwareController:
         
         # Create directories with 0o755 permissions
         try:
-            os.makedirs(self.raw_dir, exist_ok=True)
-            os.makedirs(self.compressed_dir, exist_ok=True)
-            os.chmod(self.raw_dir, 0o755)  # Ensure write permissions
-            os.chmod(self.compressed_dir, 0o755)
+            os.makedirs(self.raw_dir, exist_ok=True, mode=0o755)
+            os.makedirs(self.compressed_dir, exist_ok=True, mode=0o755)
+            # Try to set permissions, but don't fail if it's not possible
+            try:
+                os.chmod(self.raw_dir, 0o755)  # Ensure write permissions
+                os.chmod(self.compressed_dir, 0o755)
+            except (PermissionError, OSError) as chmod_error:
+                logger.warning(f"Could not set directory permissions (this is usually fine): {chmod_error}")
         except Exception as e:
             logger.error(f"Directory creation failed: {str(e)}")
             raise
@@ -191,21 +200,55 @@ class HardwareController:
         else:
             self.controller.control_lock(engage)
         
-    def read_keypad(self):
+    def read_keypad(self, direct_input=None):
+        """
+        Read keypad input. If direct_input is provided, return it directly (for testing/demo).
+        
+        Args:
+            direct_input: Optional direct key input for testing (bypasses hardware)
+        
+        Returns:
+            Key pressed as string, or None if no key pressed
+        """
+        # Direct input option for testing/demo
+        if direct_input is not None:
+            return direct_input
+        
         if IS_RASPBERRY_PI:
             key = None
+            # Ensure all rows start HIGH
+            for row in self.KEYPAD_ROWS:
+                GPIO.output(row, GPIO.HIGH)
+            
+            # Small delay to stabilize
+            time.sleep(0.001)
+            
+            # Scan each row
             for row_idx, row in enumerate(self.KEYPAD_ROWS):
                 GPIO.output(row, GPIO.LOW)  # Set current row to LOW
+                time.sleep(0.001)  # Small delay for signal to stabilize
                 
                 for col_idx, col in enumerate(self.KEYPAD_COLS):
                     if GPIO.input(col) == GPIO.LOW:  # Key is pressed
                         key = self.KEYPAD_KEYS[row_idx][col_idx]
                         
-                        # Wait for key release
+                        # Wait for key release with debounce
+                        debounce_count = 0
                         while GPIO.input(col) == GPIO.LOW:
                             time.sleep(0.01)
-                            
-                GPIO.output(row, GPIO.HIGH)  # Set current row back to HIGH
+                            debounce_count += 1
+                            if debounce_count > 50:  # Timeout after 0.5s
+                                break
+                        
+                        # Reset all rows before returning
+                        for r in self.KEYPAD_ROWS:
+                            GPIO.output(r, GPIO.HIGH)
+                        return key
+                
+                # Reset current row to HIGH before moving to next row
+                GPIO.output(row, GPIO.HIGH)
+                time.sleep(0.001)  # Small delay between rows
+            
             return key
         else:
             return self.controller.read_keypad()
@@ -248,9 +291,24 @@ class HardwareController:
         
         try:
             # Capture image using libcamera-jpeg
-            subprocess.run(["libcamera-jpeg", "-o", raw_path, "-t", "1000", "--nopreview"], 
-                          check=True, stderr=subprocess.PIPE)
-            print(f"? Captured {raw_path}")
+            result = subprocess.run(
+                ["libcamera-jpeg", "-o", raw_path, "-t", "1000", "--nopreview"], 
+                check=False,  # Changed to False to handle errors gracefully
+                stderr=subprocess.PIPE,
+                stdout=subprocess.PIPE
+            )
+            
+            # Check if capture was successful
+            if result.returncode != 0:
+                error_msg = result.stderr.decode() if result.stderr else "Unknown error"
+                logger.warning(f"Camera capture failed: {error_msg}")
+                return None
+                
+            if not os.path.exists(raw_path):
+                logger.warning("Camera capture file not created")
+                return None
+                
+            print(f"✓ Captured {raw_path}")
             
             # Compress and resize the image
             self.resize_and_compress_image(raw_path, compressed_path)
@@ -258,12 +316,16 @@ class HardwareController:
             # Notify via MQTT
             self.mqtt_client.publish("security/camera/image", compressed_path)
             
-            return compressed_path
+            return compressed_path if os.path.exists(compressed_path) else raw_path
+        except FileNotFoundError:
+            logger.warning("libcamera-jpeg not found. Camera may not be available.")
+            return None
         except subprocess.CalledProcessError as e:
-            print(f"Camera capture failed: {e.stderr.decode() if e.stderr else e}")
+            error_msg = e.stderr.decode() if e.stderr else str(e)
+            logger.warning(f"Camera capture failed: {error_msg}")
             return None
         except Exception as e:
-            print(f"Error capturing image: {e}")
+            logger.warning(f"Error capturing image: {e}")
             return None
 
     def resize_and_compress_image(self, input_path, output_path):

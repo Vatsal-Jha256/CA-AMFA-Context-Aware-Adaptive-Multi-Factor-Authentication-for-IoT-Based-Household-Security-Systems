@@ -16,8 +16,9 @@ def main():
     )
     logger = logging.getLogger("HomeLock")
     
-    # Define working keys based on test
-    working_keys = ['0', '4', '5', '6', '7', '9', '*', '#']
+    # Define working keys based on current hardware status
+    # Currently working: 5, 6, B, 8, 9, C, 0, #, D
+    working_keys = ['5', '6', 'B', '8', '9', 'C', '0', '#', 'D']
     
     try:
         # Initialize hardware
@@ -30,19 +31,19 @@ def main():
         
         # Main loop
         while True:
-            hw.display_message("Enter option:\n4:Login 5:Register")
+            hw.display_message("Enter option:\n5:Login 6:Register")
             
             # Get initial choice - wait for valid input
             choice = None
-            while choice not in ['4', '5']:
+            while choice not in ['5', '6']:
                 choice = hw.read_keypad()
-                if choice is not None and choice not in ['4', '5']:
-                    hw.display_message("Invalid choice\nUse 4 or 5")
+                if choice is not None and choice not in ['5', '6']:
+                    hw.display_message("Invalid choice\nUse 5 or 6")
                     time.sleep(1)
-                    hw.display_message("Enter option:\n4:Login 5:Register")
+                    hw.display_message("Enter option:\n5:Login 6:Register")
                 time.sleep(0.1)  # Add small delay to prevent CPU hogging
 
-            if choice == '4':  # Login flow
+            if choice == '5':  # Login flow
                 hw.display_message("Enter ID\nor press #")
                 
                 # Get username
@@ -52,7 +53,7 @@ def main():
                     if key:
                         if key == '#':  # Submit
                             break
-                        elif key == '*':  # Backspace
+                        elif key == 'D':  # Backspace (using D instead of *)
                             if username:
                                 username = username[:-1]
                         elif key in working_keys:
@@ -72,7 +73,7 @@ def main():
                     success = mfa.authenticate_user(username)
                     logger.info(f"Auth attempt for {username}: {'success' if success else 'failed'}")
             
-            elif choice == '5':  # Registration flow
+            elif choice == '6':  # Registration flow
                 hw.display_message("New User\nEnter ID:")
                 
                 # Get new username with validation
@@ -87,7 +88,7 @@ def main():
                                 hw.display_message("ID too short\nMin 2 digits")
                                 time.sleep(1)
                                 hw.display_message(f"New User ID:\n{username}")
-                        elif key == '*':  # Backspace
+                        elif key == 'D':  # Backspace (using D instead of *)
                             if username:
                                 username = username[:-1]
                         elif key in working_keys:
@@ -117,7 +118,7 @@ def main():
                                 hw.display_message("Password too short\nMin 4 digits")
                                 time.sleep(1)
                                 hw.display_message("Create password:\n" + "*" * len(password))
-                        elif key == '*':  # Backspace
+                        elif key == 'D':  # Backspace (using D instead of *)
                             if password:
                                 password = password[:-1]
                         elif key in working_keys:
@@ -133,7 +134,7 @@ def main():
                     if key:
                         if key == '#':  # Submit
                             break
-                        elif key == '*':  # Backspace
+                        elif key == 'D':  # Backspace (using D instead of *)
                             if confirm_password:
                                 confirm_password = confirm_password[:-1]
                         elif key in working_keys:
@@ -147,23 +148,8 @@ def main():
                     time.sleep(2)
                     continue
 
-                # Ask about face registration
-                hw.display_message("Register face?\n6:Yes 7:No")
-                face_choice = None
-                timeout_start = time.time()
-                while face_choice not in ['6', '7'] and time.time() - timeout_start < 10:
-                    face_choice = hw.read_keypad()
-                    time.sleep(0.1)
-                
-                # Enroll user with or without face
-                if face_choice == '6':  # With face
-                    success = mfa.enroll_user(username, password, capture_face=True)
-                elif face_choice == '7':  # Without face
-                    success = mfa.enroll_user(username, password, capture_face=False)
-                else:  # Default to no face if timeout
-                    hw.display_message("No selection\nFace skipped")
-                    time.sleep(1)
-                    success = mfa.enroll_user(username, password, capture_face=False)
+                # Enroll user (face recognition disabled)
+                success = mfa.enroll_user(username, password, capture_face=False)
                 
                 if success:
                     # QR code is already displayed in the enroll_user function

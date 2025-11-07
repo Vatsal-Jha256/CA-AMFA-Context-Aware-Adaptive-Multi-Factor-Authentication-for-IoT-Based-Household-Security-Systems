@@ -15,7 +15,6 @@ import time
 import json 
 import csv 
 import datetime
-import cv2
 
 from database.db import Database
 from utils.security import SecurityUtils
@@ -145,7 +144,7 @@ class AdaptiveMFA:
         elif risk_score < self.high_threshold:
             return ["password", "otp"]
         else:
-            return ["password", "otp", "face"]
+            return ["password", "otp"]  # Face recognition disabled
             
     def authenticate_user(self, username, context=None):
         """Full authentication process with retry mechanisms"""
@@ -213,23 +212,8 @@ class AdaptiveMFA:
             
             if not otp_verified:
                 auth_success = False
-            
-        # Face authentication with retry
-        if auth_success and "face" in auth_methods:
-            max_face_attempts = 3
-            face_verified = False
-            
-            for attempt in range(1, max_face_attempts + 1):
-                self.hardware.display_message(f"Face verify ({attempt}/{max_face_attempts})\nLook at camera")
-                if self.verify_face(username):
-                    face_verified = True
-                    break
-                elif attempt < max_face_attempts:
-                    self.hardware.display_message("Face not verified\nTry again")
-                    time.sleep(1)
-            
-            if not face_verified:
-                auth_success = False
+        
+        # Face authentication disabled - camera not working
         
         # Get device info for logging
         device_info = {
@@ -431,24 +415,10 @@ class AdaptiveMFA:
         return self.security.verify_totp(user["otp_secret"], otp)
         
     def verify_face(self, username):
-        """Verify face using MediaPipe"""
-        image_path = self.hardware.capture_image()
-        if not image_path:
-            return False
-            
-        image = cv2.imread(image_path)
-        if image is None:
-            return False
-            
-        # Get user from database
-        user = self.db.get_user(username)
-        if not user or not user["face_encoding"]:
-            return False
-            
-        # Get face encoding from image
-        encoding = self.security.get_face_encoding(image)
-        
-        return self.security.compare_faces(encoding, user["face_encoding"])
+        """Verify face - DISABLED: Camera not working"""
+        # Face recognition disabled - always return True to allow authentication
+        logger.info("Face verification disabled - camera not available")
+        return True
     
     def enroll_user(self, username, password, capture_face=True):
         """Enroll a new user with improved face capture reliability"""
@@ -464,29 +434,8 @@ class AdaptiveMFA:
         # Generate OTP secret
         otp_secret = self.security.generate_totp_secret()
         
-        # Capture face if requested
+        # Face recognition disabled - camera not working
         face_encoding = None
-        if capture_face:
-            max_attempts = 3  # Maximum number of face capture attempts
-            for attempt in range(1, max_attempts + 1):
-                self.hardware.display_message(f"Face scan {attempt}/{max_attempts}\nLook at camera")
-                image_path = self.hardware.capture_image()
-                if image_path:
-                    image = cv2.imread(image_path)
-                    if image is not None:
-                        face_encoding = self.security.get_face_encoding(image)
-                        if face_encoding is not None:
-                            self.hardware.display_message("Face captured\nsuccessfully!")
-                            time.sleep(1)
-                            break
-                
-                # If we're not on the last attempt, show retry message
-                if attempt < max_attempts:
-                    self.hardware.display_message("Face not detected\nRetrying...")
-                    time.sleep(1)
-                else:
-                    self.hardware.display_message("Face enrollment\nfailed")
-                    time.sleep(1)
         
         # Create user in database
         success = self.db.create_user(
