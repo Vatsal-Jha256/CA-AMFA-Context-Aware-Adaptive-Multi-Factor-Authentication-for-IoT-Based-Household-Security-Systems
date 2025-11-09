@@ -343,23 +343,24 @@ class AdaptiveMFA:
         return self.security.verify_password(password, user["password_hash"])
         
     def get_otp_input(self):
-        """Get OTP code from keypad or keyboard - both work simultaneously"""
-        otp = ""
-        keyboard_otp = [""]  # Use list to allow modification from thread
+        """Get OTP code - supports MIXED input from both keyboard and keypad"""
+        # Shared OTP variable that both keyboard and keypad can modify
+        otp = [""]  # Use list to allow modification from threads
         input_complete = threading.Event()
-        input_thread = None
+        input_lock = threading.Lock()  # Lock for thread-safe access to otp
         
         # Display initial message
         self.hardware.display_message("Enter OTP:\n------")
         
         # Set up keyboard input with clear instructions
         print("\n" + "="*50)
-        print("OTP Entry - KEYBOARD or KEYPAD")
+        print("OTP Entry - MIXED INPUT (Keyboard + Keypad)")
         print("="*50)
-        print("KEYBOARD: Type 6 digits, press ENTER")
-        print("KEYPAD: Press digits, then # to submit")
+        print("You can use BOTH keyboard and keypad together!")
+        print("KEYBOARD: Type digits, press ENTER when done")
+        print("KEYPAD: Press digits, press # when done")
         print("="*50)
-        print("Waiting for input...\n")
+        print("Current OTP: ", end='', flush=True)
         
         def keyboard_input_thread():
             """Thread to handle keyboard input character by character"""
@@ -376,38 +377,41 @@ class AdaptiveMFA:
                     # Set terminal to raw mode for character-by-character input
                     tty.setraw(sys.stdin.fileno())
                     
-                    current_input = ""
-                    print("Type OTP (keyboard): ", end='', flush=True)
-                    
                     while not input_complete.is_set():
                         # Check if input is available (with timeout)
                         if select.select([sys.stdin], [], [], 0.1)[0]:
                             char = sys.stdin.read(1)
                             
-                            if char == '\r' or char == '\n':  # Enter key
-                                if len(current_input) == 6:
-                                    keyboard_otp[0] = current_input
-                                    print(f"\n✓ OTP entered via keyboard: {current_input}")
+                            with input_lock:
+                                current_otp = otp[0]
+                                
+                                if char == '\r' or char == '\n':  # Enter key
+                                    if len(current_otp) == 6:
+                                        print(f"\n✓ OTP entered: {current_otp}")
+                                        input_complete.set()
+                                        break
+                                    else:
+                                        print(f"\n⚠ Need 6 digits, got {len(current_otp)}. Continue typing...")
+                                        print(f"Current OTP: {current_otp}{'_' * (6-len(current_otp))}", end='', flush=True)
+                                elif char == '\x7f' or char == '\b' or ord(char) == 127:  # Backspace
+                                    if current_otp:
+                                        otp[0] = current_otp[:-1]
+                                        new_otp = otp[0]
+                                        print(f"\rCurrent OTP: {new_otp}{'_' * (6-len(new_otp))}", end='', flush=True)
+                                        # Update OLED display
+                                        self.hardware.display_message(f"Enter OTP:\n{new_otp}{'_' * (6-len(new_otp))}")
+                                elif char == '\x03':  # Ctrl+C
+                                    print("\n⚠ OTP entry cancelled")
                                     input_complete.set()
                                     break
-                                else:
-                                    print(f"\n⚠ Need 6 digits, got {len(current_input)}. Continue typing...")
-                                    print(f"Current: {current_input}", end='', flush=True)
-                            elif char == '\x7f' or char == '\b' or ord(char) == 127:  # Backspace
-                                if current_input:
-                                    current_input = current_input[:-1]
-                                    print(f"\rType OTP (keyboard): {current_input}{' ' * (6-len(current_input))}", end='', flush=True)
-                            elif char == '\x03':  # Ctrl+C
-                                print("\n⚠ OTP entry cancelled")
-                                input_complete.set()
-                                break
-                            elif char.isdigit() and len(current_input) < 6:
-                                current_input += char
-                                print(f"\rType OTP (keyboard): {current_input}{'_' * (6-len(current_input))}", end='', flush=True)
-                                # Update OLED display in real-time
-                                self.hardware.display_message(f"Enter OTP:\n{current_input}{'_' * (6-len(current_input))}")
-                            elif char.isdigit() and len(current_input) >= 6:
-                                print(f"\n⚠ OTP already complete. Press ENTER to submit.")
+                                elif char.isdigit() and len(current_otp) < 6:
+                                    otp[0] = current_otp + char
+                                    new_otp = otp[0]
+                                    print(f"\rCurrent OTP: {new_otp}{'_' * (6-len(new_otp))}", end='', flush=True)
+                                    # Update OLED display in real-time
+                                    self.hardware.display_message(f"Enter OTP:\n{new_otp}{'_' * (6-len(new_otp))}")
+                                elif char.isdigit() and len(current_otp) >= 6:
+                                    print(f"\n⚠ OTP already complete (6 digits). Press ENTER or # to submit.")
                         else:
                             # No input available, check if we should continue
                             if input_complete.is_set():
@@ -423,7 +427,8 @@ class AdaptiveMFA:
                     logger.warning(f"Raw input failed, trying simple input: {e}")
                     user_input = input("\nEnter OTP (6 digits): ").strip()
                     if user_input.isdigit() and len(user_input) == 6:
-                        keyboard_otp[0] = user_input
+                        with input_lock:
+                            otp[0] = user_input
                         print(f"✓ OTP entered: {user_input}")
                         input_complete.set()
                     elif user_input:
@@ -440,53 +445,54 @@ class AdaptiveMFA:
         
         timeout = 60  # 60 seconds timeout for OTP entry
         start_time = time.time()
-        last_display_update = 0
         
         while time.time() - start_time < timeout:
-            # Check if keyboard input completed
+            # Check if input completed
             if input_complete.is_set():
-                if keyboard_otp[0]:
-                    return keyboard_otp[0]
-                else:
-                    # User cancelled or error
-                    break
+                with input_lock:
+                    if len(otp[0]) == 6:
+                        return otp[0]
+                    else:
+                        # User cancelled or error
+                        break
             
-            # Check hardware keypad (only if keyboard hasn't completed)
+            # Check hardware keypad - adds to the same OTP
             key = self.hardware.read_keypad()
             if key:
-                if key == '#':  # Submit on keypad
-                    if len(otp) == 6:
-                        print(f"\n✓ OTP entered via keypad: {otp}")
-                        input_complete.set()  # Stop keyboard thread
-                        return otp
+                with input_lock:
+                    current_otp = otp[0]
+                    
+                    if key == '#':  # Submit on keypad
+                        if len(current_otp) == 6:
+                            print(f"\n✓ OTP entered: {current_otp}")
+                            input_complete.set()  # Stop keyboard thread
+                            return current_otp
+                        else:
+                            print(f"\n⚠ OTP incomplete ({len(current_otp)}/6 digits). Need 6 digits.")
+                            print(f"Current OTP: {current_otp}{'_' * (6-len(current_otp))}", end='', flush=True)
+                    elif key == '*':  # Backspace on keypad
+                        if current_otp:
+                            otp[0] = current_otp[:-1]
+                            new_otp = otp[0]
+                            print(f"\rCurrent OTP: {new_otp}{'_' * (6-len(new_otp))}", end='', flush=True)
+                            self.hardware.display_message(f"Enter OTP:\n{new_otp}{'_' * (6-len(new_otp))}")
+                    elif key.isdigit() and len(current_otp) < 6:  # Add digit from keypad
+                        otp[0] = current_otp + key
+                        new_otp = otp[0]
+                        print(f"\rCurrent OTP: {new_otp}{'_' * (6-len(new_otp))}", end='', flush=True)
+                        self.hardware.display_message(f"Enter OTP:\n{new_otp}{'_' * (6-len(new_otp))}")
                     else:
-                        print(f"\n⚠ OTP incomplete ({len(otp)}/6 digits). Need 6 digits.")
-                elif key == '*':  # Backspace on keypad
-                    if otp:
-                        otp = otp[:-1]
-                        print(f"OTP (keypad): {otp}")
-                        self.hardware.display_message(f"Enter OTP:\n{otp}{'_' * (6-len(otp))}")
-                elif key.isdigit() and len(otp) < 6:  # Standard 6-digit OTP
-                    otp += key
-                    print(f"OTP (keypad): {otp}")
-                    self.hardware.display_message(f"Enter OTP:\n{otp}{'_' * (6-len(otp))}")
-                else:
-                    if not key.isdigit():
-                        print(f"⚠ Ignoring non-digit key: {key}")
-                    elif len(otp) >= 6:
-                        print(f"⚠ OTP already complete (6 digits). Press # to submit.")
-            
-            # Update display for keypad input (keyboard updates its own display)
-            if not keyboard_otp[0] and time.time() - last_display_update > 0.5:
-                if otp:
-                    self.hardware.display_message(f"Enter OTP:\n{otp}{'_' * (6-len(otp))}")
-                last_display_update = time.time()
+                        if not key.isdigit():
+                            print(f"\n⚠ Ignoring non-digit key: {key}")
+                        elif len(current_otp) >= 6:
+                            print(f"\n⚠ OTP already complete (6 digits). Press ENTER or # to submit.")
             
             time.sleep(0.1)  # Short sleep to reduce CPU usage
         
         # If timeout occurs
         input_complete.set()  # Stop keyboard thread
-        final_otp = keyboard_otp[0] if keyboard_otp[0] else otp
+        with input_lock:
+            final_otp = otp[0]
         self.hardware.display_message("OTP timeout")
         print(f"\n⚠ OTP entry timed out. Got: {final_otp if final_otp else 'nothing'}")
         return final_otp
