@@ -406,8 +406,86 @@ class HardwareController:
             # Show on display if available
             self.display_message("Camera inactive")
         
-    def display_qr_code(self, uri):
-        """Display QR code for TOTP setup with fallbacks"""
+    def send_qr_email(self, qr_path, username, secret, recipient_email="vatsaljha28@gmail.com"):
+        """Send QR code via email
+        
+        Email configuration can be set via environment variables:
+        - EMAIL_PASSWORD: Gmail app password (required)
+        - EMAIL_SENDER: Sender email address (default: vatsaljha28@gmail.com)
+        - EMAIL_SMTP_SERVER: SMTP server (default: smtp.gmail.com)
+        - EMAIL_SMTP_PORT: SMTP port (default: 587)
+        """
+        try:
+            import smtplib
+            from email.mime.multipart import MIMEMultipart
+            from email.mime.text import MIMEText
+            from email.mime.image import MIMEImage
+            
+            # Email configuration - using Gmail SMTP (configurable via environment variables)
+            smtp_server = os.environ.get("EMAIL_SMTP_SERVER", "smtp.gmail.com")
+            smtp_port = int(os.environ.get("EMAIL_SMTP_PORT", "587"))
+            sender_email = os.environ.get("EMAIL_SENDER", "vatsaljha28@gmail.com")
+            
+            # Try to get password from environment variable, otherwise prompt
+            sender_password = os.environ.get("EMAIL_PASSWORD")
+            if not sender_password:
+                logger.warning("EMAIL_PASSWORD environment variable not set. Email sending skipped.")
+                logger.info("To enable email: export EMAIL_PASSWORD='your-app-password'")
+                return False
+            
+            # Create message
+            msg = MIMEMultipart()
+            msg['From'] = sender_email
+            msg['To'] = recipient_email
+            msg['Subject'] = f"TOTP QR Code for {username} - Adaptive MFA"
+            
+            # Email body
+            body = f"""
+Hello,
+
+A new user has been registered in the Adaptive MFA system.
+
+Username: {username}
+TOTP Secret: {secret}
+
+Please scan the attached QR code with your authenticator app (Google Authenticator, Authy, etc.) to set up two-factor authentication.
+
+If you cannot scan the QR code, you can manually enter the secret key shown above.
+
+Best regards,
+Adaptive MFA System
+"""
+            msg.attach(MIMEText(body, 'plain'))
+            
+            # Attach QR code image
+            if os.path.exists(qr_path):
+                with open(qr_path, 'rb') as f:
+                    img_data = f.read()
+                image = MIMEImage(img_data)
+                image.add_header('Content-Disposition', 'attachment', filename='totp_qr_code.png')
+                msg.attach(image)
+            
+            # Send email
+            server = smtplib.SMTP(smtp_server, smtp_port)
+            server.starttls()
+            server.login(sender_email, sender_password)
+            server.send_message(msg)
+            server.quit()
+            
+            logger.info(f"QR code email sent successfully to {recipient_email}")
+            print(f"✓ QR code emailed to {recipient_email}")
+            return True
+            
+        except ImportError:
+            logger.warning("smtplib not available. Email sending skipped.")
+            return False
+        except Exception as e:
+            logger.error(f"Failed to send email: {e}")
+            print(f"✗ Email sending failed: {e}")
+            return False
+
+    def display_qr_code(self, uri, username=None, email_recipient="vatsaljha28@gmail.com"):
+        """Display QR code for TOTP setup with fallbacks and email option"""
         try:
             # First extract and display the secret key (most important part)
             import re
@@ -423,6 +501,7 @@ class HardwareController:
                 time.sleep(2)
             
             # Try to show QR on PC if available
+            qr_path = None
             try:
                 import qrcode
                 from PIL import Image
@@ -455,6 +534,10 @@ class HardwareController:
                 
                 print(f"QR code saved to: {qr_path}")
                 print("You can scan this with your authenticator app")
+                
+                # Send email with QR code
+                if qr_path and username:
+                    self.send_qr_email(qr_path, username, secret, email_recipient)
                 
             except ImportError:
                 print("QR code generation requires qrcode[pil] package")

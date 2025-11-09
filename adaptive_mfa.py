@@ -453,8 +453,8 @@ class AdaptiveMFA:
             self.hardware.display_message("TOTP Secret:\n" + otp_secret)
             time.sleep(3)  # Give time to read the secret
             
-            # Display actual QR code if hardware supports it
-            self.hardware.display_qr_code(totp_uri)
+            # Display actual QR code if hardware supports it and email it
+            self.hardware.display_qr_code(totp_uri, username=username)
             time.sleep(5)
         else:
             self.hardware.display_message("Enrollment\nfailed")
