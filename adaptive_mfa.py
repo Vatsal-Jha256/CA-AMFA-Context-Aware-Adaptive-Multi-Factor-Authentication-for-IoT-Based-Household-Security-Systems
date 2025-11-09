@@ -343,68 +343,96 @@ class AdaptiveMFA:
         return self.security.verify_password(password, user["password_hash"])
         
     def get_otp_input(self):
-        """Get OTP code from keypad or keyboard"""
+        """Get OTP code from keypad or keyboard - keyboard input is preferred for reliability"""
         otp = ""
         self.hardware.display_message("Enter OTP:\n" + otp)
         
-        # Set up keyboard input
-        print("Enter OTP (type on keyboard or use keypad):")
+        # Set up keyboard input with clear instructions
+        print("\n" + "="*50)
+        print("OTP Entry - Use KEYBOARD (recommended) or Keypad")
+        print("="*50)
+        print("KEYBOARD: Type 6 digits and press ENTER")
+        print("KEYPAD: Enter digits, press # to submit")
+        print("="*50 + "\n")
+        
+        # Use a simpler approach: thread-based input for SSH compatibility
+        keyboard_otp = [""]  # Use list to allow modification from thread
+        input_complete = threading.Event()
+        input_thread = None
+        
+        def keyboard_input_thread():
+            """Thread to handle keyboard input (works better over SSH)"""
+            try:
+                # Simple input() approach - works reliably over SSH
+                user_input = input("Enter OTP (6 digits): ").strip()
+                if user_input.isdigit() and len(user_input) == 6:
+                    keyboard_otp[0] = user_input
+                    input_complete.set()
+                elif user_input:
+                    print(f"⚠ Invalid input. Expected 6 digits, got: {user_input}")
+            except (EOFError, KeyboardInterrupt):
+                input_complete.set()
+            except Exception as e:
+                logger.warning(f"Keyboard input error: {e}")
+        
+        # Start keyboard input thread
+        try:
+            input_thread = threading.Thread(target=keyboard_input_thread, daemon=True)
+            input_thread.start()
+        except Exception as e:
+            logger.warning(f"Could not start keyboard input thread: {e}")
         
         timeout = 60  # 60 seconds timeout for OTP entry
         start_time = time.time()
+        last_display_update = 0
         
         while time.time() - start_time < timeout:
+            # Check if keyboard input completed
+            if input_complete.is_set():
+                if keyboard_otp[0]:
+                    print(f"\n✓ OTP entered via keyboard: {keyboard_otp[0]}")
+                    return keyboard_otp[0]
+                else:
+                    # User cancelled or error
+                    break
+            
             # Check hardware keypad
             key = self.hardware.read_keypad()
             if key:
                 if key == '#':  # Submit on keypad
-                    print(f"OTP entered: {otp}")
-                    return otp
+                    if len(otp) == 6:
+                        print(f"\n✓ OTP entered via keypad: {otp}")
+                        input_complete.set()  # Stop keyboard thread
+                        return otp
+                    else:
+                        print(f"\n⚠ OTP incomplete ({len(otp)}/6 digits). Need 6 digits.")
                 elif key == '*':  # Backspace on keypad
                     if otp:
                         otp = otp[:-1]
-                        print(f"OTP (backspace): {otp}")
+                        print(f"OTP (keypad backspace): {otp}")
                 elif key.isdigit() and len(otp) < 6:  # Standard 6-digit OTP
                     otp += key
                     print(f"OTP (keypad): {otp}")
-                
-                self.hardware.display_message("Enter OTP:\n" + otp)
+                else:
+                    if not key.isdigit():
+                        print(f"⚠ Ignoring non-digit key: {key}")
+                    elif len(otp) >= 6:
+                        print(f"⚠ OTP already complete (6 digits). Press # to submit.")
             
-            # Check for keyboard input (non-blocking)
-            if os.name == 'nt':  # Windows
-                import msvcrt
-                if msvcrt.kbhit():
-                    char = msvcrt.getch().decode('utf-8', errors='ignore')
-                    self._process_keyboard_input(char, otp)
-            else:  # Unix/Linux
-                import select
-                import sys
-                if select.select([sys.stdin], [], [], 0)[0]:
-                    char = sys.stdin.read(1)
-                    self._process_keyboard_input(char, otp)
+            # Update display periodically (not every loop to avoid flicker)
+            if time.time() - last_display_update > 0.3:
+                display_otp = keyboard_otp[0] if keyboard_otp[0] else otp
+                self.hardware.display_message(f"Enter OTP:\n{display_otp}{'_' * (6-len(display_otp))}")
+                last_display_update = time.time()
             
             time.sleep(0.1)  # Short sleep to reduce CPU usage
         
         # If timeout occurs
+        input_complete.set()  # Stop keyboard thread
+        final_otp = keyboard_otp[0] if keyboard_otp[0] else otp
         self.hardware.display_message("OTP timeout")
-        print("OTP entry timed out")
-        return otp
-
-    def _process_keyboard_input(self, char, otp):
-        """Process a single character from keyboard input for OTP"""
-        if char == '\r' or char == '\n':  # Enter key
-            print(f"OTP submitted: {otp}")
-            return otp
-        elif char == '\b' or char == '\x7f':  # Backspace
-            if otp:
-                otp = otp[:-1]
-                print(f"OTP (backspace): {otp}")
-        elif char.isdigit() and len(otp) < 6:
-            otp += char
-            print(f"OTP (keyboard): {otp}")
-        
-        self.hardware.display_message("Enter OTP:\n" + otp)
-        return None
+        print(f"\n⚠ OTP entry timed out. Got: {final_otp if final_otp else 'nothing'}")
+        return final_otp
 
     def verify_otp(self, username, otp):
         """Verify OTP using TOTP"""
